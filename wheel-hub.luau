@@ -1,5 +1,6 @@
 -- Wheel & Code Hub - auto redeem codes + auto spin (Wheel of Luck / Glory / Odyssey Wish) + auto claim update log rewards
 -- Prologue version: auto select Heavy Weapon (retries until server registers) + auto Skip Tutorial (retries until Roblox teleport starts)
+-- Lobby version also hides the stuck choose-weapon popup (prologue skip leaves main task Main_001 uncompletable)
 -- Config auto-saves to disk (bound to your machine, not your account). All features default ON.
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -32,6 +33,7 @@ running.codes, running.luck, running.glory, running.odyssey = cfg.codes == true,
 running.updatelog = true
 running.heavy = cfg.heavy ~= false
 running.skip = cfg.skip ~= false
+running.noweaponpopup = cfg.noweaponpopup ~= false
 
 local function mine()
 	return getgenv().WHEEL_HUB_SESSION == session
@@ -47,6 +49,7 @@ local function saveConfig()
 				odyssey = running.odyssey and true or false,
 				heavy = running.heavy and true or false,
 				skip = running.skip and true or false,
+				noweaponpopup = running.noweaponpopup and true or false,
 			}))
 		end)
 	end
@@ -287,6 +290,98 @@ local KeyString = require(ReplicatedStorage.Enum:WaitForChild("KeyString"))
 local DataUtil = Modules.DataUtil
 local CurrencyUtil = Modules.CurrencyUtil
 local SeasonLotteryUtil = Modules.SeasonLotteryUtil
+
+--------------------------------------------------------------------
+-- STUCK WEAPON POPUP SUPPRESSOR (lobby only)
+-- The prologue skip registers the weapon server-side, but main task
+-- Main_001 (EquipThing) stays active forever: UpdateTaskProgress skips
+-- EquipThing actions and FinishTask has no callers, so the task can
+-- never complete. Its guide reopens ScreenDefaultWeapon on every join,
+-- and Select is a silent no-op once GetDefaultWeapon is true. The
+-- popup drags the game into a modal state (blur, FOV 80, HUD hidden)
+-- that only GUIWindow:Close releases, so hiding the ScreenGui alone
+-- is not enough. We close it through the window manager AND no-op its
+-- Open so the modal never engages. Active ONLY while a weapon is
+-- already registered, so a fresh account can still pick one normally.
+--------------------------------------------------------------------
+local function weaponRegistered()
+	local v = false
+	pcall(function()
+		v = DataUtil:GetValue(LocalPlayer, {KeyString.EquipmentUtil.Equipment, KeyString.EquipmentUtil.GetDefaultWeapon}) == true
+	end)
+	return v
+end
+
+local GUIWindowClass
+pcall(function()
+	GUIWindowClass = require(ReplicatedStorage.Framework.Systems.GUILib.Client.Classes.GUIWindow)
+end)
+
+local function getWeaponWindow()
+	if not GUIWindowClass then return nil end
+	local ok, win = pcall(function()
+		return GUIWindowClass:FindWindow("ScreenDefaultWeapon")
+	end)
+	return ok and win or nil
+end
+
+local function suppressWeaponWindow()
+	if not (running.noweaponpopup and mine() and weaponRegistered()) then return end
+	local win = getWeaponWindow()
+	if win then
+		if win.Opened then
+			pcall(function() win:ToggleOpen(false) end)
+		end
+		if not win.__hubNoOpen then
+			win.__hubNoOpen = true
+			win.__hubOrigOpen = win.Open
+			win.Open = function() end
+		end
+	end
+	pcall(function()
+		local root = LocalPlayer.PlayerGui:FindFirstChild("MainGuiIgnoreGuiInset")
+		local sdw = root and root:FindFirstChild("ScreenDefaultWeapon")
+		if sdw and sdw.Visible then sdw.Visible = false end
+	end)
+end
+
+local function restoreWeaponWindow()
+	local win = getWeaponWindow()
+	if win and win.__hubNoOpen then
+		win.__hubNoOpen = nil
+		if win.__hubOrigOpen then win.Open = win.__hubOrigOpen end
+	end
+end
+
+do
+	task.spawn(function()
+		local pg = LocalPlayer:WaitForChild("PlayerGui")
+		-- the window registry may not be built yet right after join - retry
+		for _ = 1, 15 do
+			if not mine() then return end
+			suppressWeaponWindow()
+			if getWeaponWindow() then break end
+			task.wait(1)
+		end
+		local root = pg:WaitForChild("MainGuiIgnoreGuiInset", 30)
+		if not root then return end
+		local function hookScreen(sdw)
+			sdw:GetPropertyChangedSignal("Visible"):Connect(function()
+				if sdw.Visible then suppressWeaponWindow() end
+			end)
+			suppressWeaponWindow()
+		end
+		local existing = root:FindFirstChild("ScreenDefaultWeapon")
+		if existing then hookScreen(existing) end
+		root.ChildAdded:Connect(function(c)
+			if c.Name == "ScreenDefaultWeapon" then
+				task.defer(function()
+					if c.Parent then hookScreen(c) end
+				end)
+			end
+		end)
+	end)
+end
 
 local CODES = {
 	"AAM",
@@ -551,6 +646,21 @@ updatelogToggle = Tab:Toggle({
 	Callback = function(state)
 		running.updatelog = state
 		if state then task.spawn(updatelogLoop) end
+	end,
+})
+
+Tab:Toggle({
+	Title = "Hide Choose-Weapon Popup",
+	Desc = "Lobby only - closes the stuck popup via the window manager (releases blur/HUD)",
+	Value = running.noweaponpopup,
+	Callback = function(state)
+		running.noweaponpopup = state
+		saveConfig()
+		if state then
+			suppressWeaponWindow()
+		else
+			restoreWeaponWindow()
+		end
 	end,
 })
 
