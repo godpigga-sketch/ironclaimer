@@ -1,4 +1,4 @@
--- Wheel & Code Hub - auto redeem codes + auto spin (Wheel of Luck / Glory / Odyssey Wish)
+-- Wheel & Code Hub - auto redeem codes + auto spin (Wheel of Luck / Glory / Odyssey Wish) + auto claim update log rewards
 -- Config auto-saves to disk (bound to your machine, not your account). All features default ON.
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -41,6 +41,7 @@ local cfg = loadConfig() or { codes = true, luck = true, glory = true, odyssey =
 getgenv().WHEEL_HUB_FLAGS = {}
 local running = getgenv().WHEEL_HUB_FLAGS
 running.codes, running.luck, running.glory, running.odyssey = cfg.codes == true, cfg.luck == true, cfg.glory == true, cfg.odyssey == true
+running.updatelog = true
 
 local function mine()
 	return getgenv().WHEEL_HUB_SESSION == session
@@ -54,6 +55,10 @@ local SeasonRemote = ReplicatedStorage.Framework.Features.SeasonSystem:WaitForCh
 local HonorRemote = ReplicatedStorage.Framework.Features.HonorSystem:WaitForChild("RemoteEvent")
 local EventHallRE = ReplicatedStorage.Framework.Gameplay.EventHallSystem:WaitForChild("EventHallRE")
 local HonorConfig = require(ReplicatedStorage.Framework.Features.HonorSystem:WaitForChild("HonorConfig"))
+
+local UpdateLogRemote = ReplicatedStorage.Framework.Features.UpdateLogSystem:WaitForChild("RemoteEvent")
+local UpdateLogConfig = require(ReplicatedStorage.Configs:WaitForChild("ResUpdateLog"))
+local KeyString = require(ReplicatedStorage.Enum:WaitForChild("KeyString"))
 
 local DataUtil = Modules.DataUtil
 local CurrencyUtil = Modules.CurrencyUtil
@@ -136,6 +141,7 @@ local taskState = {
 	luck = running.luck and "starting..." or "off",
 	glory = running.glory and "starting..." or "off",
 	odyssey = running.odyssey and "starting..." or "off",
+	updatelog = "starting...",
 }
 
 local Status = Tab:Paragraph({ Title = "Tasks", Desc = "..." })
@@ -146,6 +152,7 @@ local function renderStatus()
 			("Wheel of Luck: %s"):format(taskState.luck),
 			("Wheel of Glory: %s"):format(taskState.glory),
 			("Odyssey Wish: %s"):format(taskState.odyssey),
+			("Update Log: %s"):format(taskState.updatelog),
 		}, "\n"))
 	end)
 end
@@ -155,7 +162,7 @@ local function setTask(key, text)
 end
 renderStatus()
 
-local codesToggle, luckToggle, gloryToggle, odysseyToggle
+local codesToggle, luckToggle, gloryToggle, odysseyToggle, updatelogToggle
 
 local function redeemLoop()
 	local redeemed, used, other = 0, 0, 0
@@ -245,6 +252,59 @@ local function odysseyLoop()
 	end
 end
 
+local UPDATELOG_IDS = UpdateLogConfig.__index or {}
+
+local function getClaimedTable()
+	local claimed = nil
+	pcall(function()
+		claimed = DataUtil:GetValue(LocalPlayer, {KeyString.UpdateLogUtil.UpdateLog}) or {}
+	end)
+	return claimed or {}
+end
+
+local function countClaimed(claimed)
+	local n = 0
+	for _, id in ipairs(UPDATELOG_IDS) do
+		if claimed[id] then n += 1 end
+	end
+	return n
+end
+
+local function updatelogLoop()
+	local total = #UPDATELOG_IDS
+	local tried = {}
+	while running.updatelog and mine() do
+		local claimed = getClaimedTable()
+		local done = countClaimed(claimed)
+		if done >= total then
+			setTask("updatelog", ("%d/%d rewards claimed - all done"):format(done, total))
+			break
+		end
+		local pending
+		for _, id in ipairs(UPDATELOG_IDS) do
+			if not claimed[id] and (tried[id] or 0) < 3 then
+				pending = id
+				break
+			end
+		end
+		if not pending then
+			setTask("updatelog", ("%d/%d claimed, %d failed"):format(done, total, total - done))
+			break
+		end
+		tried[pending] = (tried[pending] or 0) + 1
+		setTask("updatelog", ("claiming %s (%d/%d)..."):format(pending, done, total))
+		pcall(function()
+			UpdateLogRemote:FireServer("ClaimReward", pending)
+		end)
+		task.wait(1)
+	end
+	if mine() and running.updatelog then
+		local claimed = getClaimedTable()
+		local done = countClaimed(claimed)
+		notify("Update Log", ("%d/%d rewards claimed"):format(done, #UPDATELOG_IDS))
+	end
+end
+
 codesToggle = Tab:Toggle({
 	Title = "Auto Redeem Codes",
 	Desc = ("%d codes queued"):format(#CODES),
@@ -289,9 +349,20 @@ odysseyToggle = Tab:Toggle({
 	end,
 })
 
+updatelogToggle = Tab:Toggle({
+	Title = "Auto Claim Update Log Rewards",
+	Desc = "Claims every version's rewards once",
+	Value = true,
+	Callback = function(state)
+		running.updatelog = state
+		if state then task.spawn(updatelogLoop) end
+	end,
+})
+
 if running.codes then task.spawn(redeemLoop) end
 if running.luck then task.spawn(luckLoop) end
 if running.glory then task.spawn(gloryLoop) end
 if running.odyssey then task.spawn(odysseyLoop) end
+if running.updatelog then task.spawn(updatelogLoop) end
 
 notify("Hub loaded", "RightShift to toggle menu - config auto-saves")
