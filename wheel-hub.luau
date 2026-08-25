@@ -97,6 +97,7 @@ end
 if IS_PROLOGUE then
 	local EquipmentRE = ReplicatedStorage.Framework.Gameplay.EquipmentSystem:WaitForChild("EquipmentRE")
 	local WorldRemote = ReplicatedStorage.Framework.Gameplay.WorldPlace:WaitForChild("WorldUtil"):WaitForChild("RemoteEvent")
+	local PrologueRemote = ReplicatedStorage.Framework.Gameplay.PrologueSysem:WaitForChild("PrologueUtil"):WaitForChild("RemoteEvent")
 	local KeyString = require(ReplicatedStorage:WaitForChild("Enum"):WaitForChild("KeyString"))
 	local DataUtil = require(ReplicatedStorage:WaitForChild("Framework")).Modules.DataUtil
 
@@ -139,7 +140,8 @@ if IS_PROLOGUE then
 		pcall(function() getgenv().WHEEL_HUB_TPCONN:Disconnect() end)
 	end
 	getgenv().WHEEL_HUB_TPCONN = LocalPlayer.OnTeleport:Connect(function(state)
-		if state == Enum.PlayerTeleportState.Started then
+		local s = tostring(state) -- avoid Enum.PlayerTeleportState: not resolvable in some executor sandboxes
+		if s:find("Started", 1, true) or s == "0" or tonumber(s) == 0 then
 			teleportStarted = true
 		end
 	end)
@@ -170,9 +172,45 @@ if IS_PROLOGUE then
 		return heavyRegistered()
 	end
 
-	local function skipLoop()
+	local function prologueOver()
+		local ok, v = pcall(function()
+			return LocalPlayer:GetAttribute("PrologueOver")
+		end)
+		return ok and v == true
+	end
+
+	-- The game only registers the prologue as complete when the server receives
+	-- "PrologueAnimEnd" (sets Prologue.AllOver -> PrologueOver attribute). Skipping
+	-- without this makes the lobby bounce you straight back into the prologue.
+	local function markPrologueDone()
 		local attempts = 0
-		while running.skip and mine() and not teleportStarted do
+		while running.skip and mine() do
+			if prologueOver() then
+				setTask("skip", "prologue registered complete")
+				return true
+			end
+			attempts += 1
+			pcall(function()
+				PrologueRemote:FireServer("PrologueAnimEnd")
+			end)
+			setTask("skip", ("registering prologue completion (%d)..."):format(attempts))
+			task.wait(1)
+			if attempts >= 30 and not prologueOver() then
+				setTask("skip", "server not confirming - skip aborted (no teleport)")
+				notify("Prologue", "Could not register completion - skip aborted")
+				return false
+			end
+		end
+		return prologueOver()
+	end
+
+	local function skipLoop()
+		-- step 1: register completion FIRST, otherwise the game bounces you back
+		if not markPrologueDone() then
+			return
+		end
+		local attempts = 0
+		while running.skip and mine() and not teleportStarted and attempts < 10 do
 			attempts += 1
 			pcall(function()
 				WorldRemote:FireServer("BackLobby")
@@ -205,7 +243,7 @@ if IS_PROLOGUE then
 
 	Tab:Toggle({
 		Title = "Auto Skip Tutorial",
-		Desc = "Fires BackLobby until Roblox teleport starts",
+		Desc = "Registers completion first, then BackLobby",
 		Value = running.skip,
 		Callback = function(state)
 			running.skip = state
