@@ -327,4 +327,199 @@ local function redeemLoop()
 		if not (running.codes and mine()) then break end
 		local attempts = 0
 		while running.codes and mine() and attempts < 10 do
-			local 
+			local ok, res = pcall(function()
+				return CodesRF:InvokeServer("RedeemCode", code)
+			end)
+			if not ok then
+				other += 1
+				setTask("codes", ("[%d/%d] %s: error"):format(i, #CODES, code))
+				break
+			end
+			res = trim(tostring(res or ""))
+			if res == "Cooldown" or res == "Busy" then
+				attempts += 1
+				setTask("codes", ("[%d/%d] %s: %s, retrying (%d)"):format(i, #CODES, code, RESPONSES[res] or res, attempts))
+				task.wait(res == "Cooldown" and 5 or 3)
+			else
+				if res == "Success" then
+					redeemed += 1
+				elseif res == "AlreadyUsed" or res == "AlreadyDiscord" then
+					used += 1
+				else
+					other += 1
+				end
+				setTask("codes", ("[%d/%d] %s: %s"):format(i, #CODES, code, RESPONSES[res] or res))
+				break
+			end
+		end
+		task.wait(0.4)
+	end
+	if mine() and running.codes then
+		setTask("codes", ("done: %d redeemed, %d already used, %d failed (reruns on rejoin)"):format(redeemed, used, other))
+		notify("Codes", ("%d redeemed, %d already used, %d failed"):format(redeemed, used, other))
+	end
+end
+
+local function luckLoop()
+	while running.luck and mine() do
+		local can = true
+		pcall(function() can = SeasonLotteryUtil:CanBuySeasonLottery(LocalPlayer, 1) end)
+		if not can then
+			setTask("luck", "waiting for tickets...")
+			task.wait(3)
+		else
+			SeasonRemote:FireServer("TrySeasonLottery", 1)
+			setTask("luck", "spinning...")
+			task.wait(1.5)
+		end
+	end
+end
+
+local function gloryLoop()
+	local cost = tonumber(HonorConfig.SINGLE_SPIN_COST) or 0
+	while running.glory and mine() do
+		local gem = 0
+		pcall(function()
+			local pd = DataUtil:GetPlayerData(LocalPlayer)
+			gem = (pd and pd.Currency and pd.Currency.Gem) or 0
+		end)
+		if gem < cost then
+			setTask("glory", "waiting for gems...")
+			task.wait(3)
+		else
+			HonorRemote:FireServer("HonorSpin", 1)
+			setTask("glory", "spinning...")
+			task.wait(1.5)
+		end
+	end
+end
+
+local function odysseyLoop()
+	while running.odyssey and mine() do
+		local tickets = 0
+		pcall(function() tickets = CurrencyUtil:GetCount(LocalPlayer, "GachaTicket") or 0 end)
+		if tickets < 1 then
+			setTask("odyssey", "waiting for tickets...")
+			task.wait(3)
+		else
+			EventHallRE:FireServer("GachaDraw", "Odyssey", 1)
+			setTask("odyssey", "spinning...")
+			task.wait(3)
+		end
+	end
+end
+
+local UPDATELOG_IDS = UpdateLogConfig.__index or {}
+
+local function getClaimedTable()
+	local claimed = nil
+	pcall(function()
+		claimed = DataUtil:GetValue(LocalPlayer, {KeyString.UpdateLogUtil.UpdateLog}) or {}
+	end)
+	return claimed or {}
+end
+
+local function countClaimed(claimed)
+	local n = 0
+	for _, id in ipairs(UPDATELOG_IDS) do
+		if claimed[id] then n += 1 end
+	end
+	return n
+end
+
+local function updatelogLoop()
+	local total = #UPDATELOG_IDS
+	local tried = {}
+	while running.updatelog and mine() do
+		local claimed = getClaimedTable()
+		local done = countClaimed(claimed)
+		if done >= total then
+			setTask("updatelog", ("%d/%d rewards claimed - all done"):format(done, total))
+			break
+		end
+		local pending
+		for _, id in ipairs(UPDATELOG_IDS) do
+			if not claimed[id] and (tried[id] or 0) < 3 then
+				pending = id
+				break
+			end
+		end
+		if not pending then
+			setTask("updatelog", ("%d/%d claimed, %d failed"):format(done, total, total - done))
+			break
+		end
+		tried[pending] = (tried[pending] or 0) + 1
+		setTask("updatelog", ("claiming %s (%d/%d)..."):format(pending, done, total))
+		pcall(function()
+			UpdateLogRemote:FireServer("ClaimReward", pending)
+		end)
+		task.wait(1)
+	end
+	if mine() and running.updatelog then
+		local claimed = getClaimedTable()
+		local done = countClaimed(claimed)
+		notify("Update Log", ("%d/%d rewards claimed"):format(done, #UPDATELOG_IDS))
+	end
+end
+
+codesToggle = Tab:Toggle({
+	Title = "Auto Redeem Codes",
+	Desc = ("%d codes queued"):format(#CODES),
+	Value = running.codes,
+	Callback = function(state)
+		running.codes = state
+		saveConfig()
+		if state then task.spawn(redeemLoop) end
+	end,
+})
+
+luckToggle = Tab:Toggle({
+	Title = "Auto Spin - Wheel of Luck",
+	Desc = "Season Lucky Tickets",
+	Value = running.luck,
+	Callback = function(state)
+		running.luck = state
+		saveConfig()
+		if state then task.spawn(luckLoop) end
+	end,
+})
+
+gloryToggle = Tab:Toggle({
+	Title = "Auto Spin - Wheel of Glory",
+	Desc = "Costs Gems",
+	Value = running.glory,
+	Callback = function(state)
+		running.glory = state
+		saveConfig()
+		if state then task.spawn(gloryLoop) end
+	end,
+})
+
+odysseyToggle = Tab:Toggle({
+	Title = "Auto Spin - Odyssey Wish",
+	Desc = "Costs Gacha Tickets",
+	Value = running.odyssey,
+	Callback = function(state)
+		running.odyssey = state
+		saveConfig()
+		if state then task.spawn(odysseyLoop) end
+	end,
+})
+
+updatelogToggle = Tab:Toggle({
+	Title = "Auto Claim Update Log Rewards",
+	Desc = "Claims every version's rewards once",
+	Value = true,
+	Callback = function(state)
+		running.updatelog = state
+		if state then task.spawn(updatelogLoop) end
+	end,
+})
+
+if running.codes then task.spawn(redeemLoop) end
+if running.luck then task.spawn(luckLoop) end
+if running.glory then task.spawn(gloryLoop) end
+if running.odyssey then task.spawn(odysseyLoop) end
+if running.updatelog then task.spawn(updatelogLoop) end
+
+notify("Hub loaded", "RightShift to toggle menu - config auto-saves")
